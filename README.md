@@ -1357,21 +1357,33 @@ Dos conclusiones:
 1. **No sirve para inline**: 20 s hasta el primer token tras 5 minutos de inactividad.
 2. **No es un modelo FIM**: sus capabilities son `completion, tools, thinking`, sin `insert`. No rellena huecos aunque le pases `suffix`.
 
-## 17.4 Cómo reproducirlo
+## 17.4 `qwen2.5-coder:7b` — `num_ctx=4096`
+
+| Escenario | TTFT | Total (64 tok) | tok/s | Carga |
+| --------- | ---- | -------------- | ----- | ----- |
+| Frío (modelo descargado) | 4 330 ms | 5,50 s | 54,6 | 4,20 s |
+| Caliente | **20 ms** | **1,13 s** | **57,4** | 0,00 s |
+
+Modelo `7.6B Q4_K_M`, `capabilities: completion, tools, insert` (sí es FIM), 4,6 GB en VRAM con 4K de contexto.
+
+Comparado con el 1.5b: el TTFT caliente es igual de bueno (20 ms vs 9 ms), pero **genera 3× más lento** (57 vs 174 tok/s). Para una línea típica de 15 tokens son ~290 ms frente a ~100 ms. El cold start también triplica (4,2 s vs 0,9 s), lo que hace el `keep_alive=-1` aún más importante.
+
+## 17.5 Cómo reproducirlo
 
 ```bash
 ./scripts/bench.sh qwen2.5-coder:1.5b
 ./scripts/bench.sh qwen2.5-coder:1.5b --ctx 8192
-./scripts/bench.sh gpt-oss:20b --ctx 65536 --tokens 48
 ./scripts/bench.sh qwen2.5-coder:7b
+./scripts/bench.sh gpt-oss:20b --ctx 65536 --tokens 48
 ```
 
 `--warm-only` evita descargar el modelo y mide sólo el caso caliente. Sin ese flag, el script ejecuta `ollama stop` antes de la primera medición.
 
-## 17.5 Interpretación para uso real
+## 17.6 Interpretación para uso real
 
 - Con el perfil `autocomplete` (`keep_alive=-1`) sólo pagas la carga en frío **una vez por arranque del servicio**. Después, 9 ms de TTFT: el ghost text aparece antes de que levantes la tecla.
 - El total de 380 ms para 64 tokens es el peor caso (completion larga). Una línea típica son 10–20 tokens: ~100 ms.
+- Si cambias al 7b, espera ~3× más tiempo por token. Sigue siendo usable, pero deja de sentirse instantáneo en completions largas.
 - Si ves 1–2 s por pulsación, no es el modelo: es `keep_alive` sin fijar, contexto demasiado grande, o el modelo se está recargando por cambio de perfil.
 
 ---
