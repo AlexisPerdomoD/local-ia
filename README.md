@@ -1,8 +1,11 @@
 # Local LLM Workstation
 
-Guía para ejecutar modelos LLM locales orientados a programación y agentes de código en **Arch Linux + AMD Radeon RX 9060 XT de 16 GB + OpenCode**.
+Guía para ejecutar modelos LLM locales en **Arch Linux + AMD Radeon RX 9060 XT de 16 GB**, con dos cargas de trabajo bien distintas:
 
-> **Estado de esta guía:** 30 de octubre de 2026. Los modelos, etiquetas de Ollama, paquetes de Arch y opciones de los runtimes cambian con frecuencia. Comprueba siempre las páginas oficiales enlazadas antes de automatizar instalaciones.
+1. **Agente de código** (OpenCode) sobre repositorios reales.
+2. **Autocompletado inline en Neovim** (ghost text), donde lo que importa es la latencia en milisegundos.
+
+> **Estado de esta guía:** 10 de noviembre de 2026, verificada contra Ollama 0.40.15 y minuet-ai.nvim v0.10.0. Los modelos, etiquetas de Ollama, paquetes de Arch y opciones de los runtimes cambian con frecuencia. Comprueba siempre las páginas oficiales enlazadas antes de automatizar instalaciones.
 
 ## Objetivo
 
@@ -15,7 +18,15 @@ Construir un entorno local que permita usar OpenCode sobre repositorios reales �
 - Ejecutar el modelo en la GPU AMD, evitando offloading a RAM salvo cuando se busque deliberadamente probar modelos mayores.
 - Cambiar entre modelos y runtimes sin rehacer la instalación.
 
+Y, sobre el mismo runtime, un segundo objetivo con requisitos opuestos:
+
+- Completar código inline en Neovim con un modelo **FIM** (fill-in-the-middle) local.
+- Latencia percibida por pulsación en el orden de **decenas de milisegundos**, no de segundos.
+- Cero dependencia de servicios en la nube, claves de API o cuentas de terceros.
+
 La primera fase usa **Ollama + Vulkan + OpenCode**. La segunda, opcional, añade **llama.cpp** para probar GGUF y ajustar con más precisión la inferencia.
+
+El conflicto central de este repositorio es que ambas cargas piden configuraciones incompatibles: el agente quiere **contexto largo y un modelo grande**, el autocompletado quiere **contexto corto y un modelo caliente**. En vez de elegir una, el repo mantiene **perfiles**: conjuntos de variables de entorno que se aplican al servicio con un script (§14).
 
 ## Hardware de referencia
 
@@ -58,6 +69,61 @@ AMD Radeon RX 9060 XT (16 GB)
 Ollama administra descargas, modelos, plantillas, parámetros y una API. llama.cpp permite trabajar directamente con GGUF y ajustar parámetros de inferencia y offloading. Comparten tecnología del ecosistema `llama.cpp`/`ggml` en muchas rutas, pero **no son intercambiables en cuanto a control ni configuración**.
 
 OpenCode descubre automáticamente los modelos de Ollama cuando el servicio está escuchando en `127.0.0.1:11434`. No hace falta un plugin adicional ni un proveedor OpenAI personalizado para la instalación local básica.
+
+Neovim, en cambio, no habla con Ollama por sí solo: necesita un cliente que envíe `prompt` + `suffix` al endpoint FIM y dibuje el ghost text. Aquí se usa **minuet-ai.nvim** (§16).
+
+## Mapa del repositorio
+
+```text
+local-ia/
+├── README.md                  ← este documento
+├── install.sh                 ← instalación base + pasos opcionales
+├── .gitignore
+├── profiles/                  ← un archivo por perfil de servicio
+│   ├── autocomplete.env       ← latencia mínima (Neovim inline)
+│   ├── agent.env              ← contexto largo (OpenCode)
+│   ├── hybrid.env             ← ambos a la vez
+│   └── lean.env               ← diagnóstico / sin optimizaciones
+├── scripts/
+│   ├── ollama-profile.sh      ← list / current / show / apply
+│   ├── healthcheck.sh         ← GPU + servicio + config + modelos
+│   └── bench.sh               ← TTFT y tok/s de una petición FIM
+└── nvim/
+    └── minuet.lua             ← configuración de referencia para Neovim
+```
+
+## Inicio rápido
+
+Desde este repositorio, en una máquina Arch ya instalada:
+
+```bash
+# 1. Estado actual del stack
+./scripts/healthcheck.sh
+
+# 2. Descargar el modelo de autocompletado (986 MB)
+ollama pull qwen2.5-coder:1.5b
+
+# 3. Aplicar el perfil de latencia mínima (pide sudo)
+./scripts/ollama-profile.sh apply autocomplete --preload
+
+# 4. Medir
+./scripts/bench.sh qwen2.5-coder:1.5b
+
+# 5. Instalar la config de Neovim
+./install.sh --neovim
+```
+
+En el editor, a partir de ahí: escribe en un archivo, espera el ghost text y acéptalo con `<C-a>`.
+
+## Cómo se alterna entre agente y autocompletado
+
+```bash
+./scripts/ollama-profile.sh apply agent --preload   # trabajar con OpenCode
+./scripts/ollama-profile.sh apply autocomplete      # volver a Neovim
+./scripts/ollama-profile.sh current                 # ver qué hay activo
+```
+
+`apply` reescribe el drop-in de systemd, reinicia el servicio y espera a que la API responda. El modelo **no** se carga hasta la primera petición salvo que uses `--preload`, y cambiar el perfil descarga los modelos en memoria (ver §14).
 
 ---
 
@@ -219,6 +285,8 @@ Crea un override de systemd:
 ```bash
 sudo systemctl edit ollama.service
 ```
+
+> Esta es la vía manual. La vía reproducible es `./scripts/ollama-profile.sh apply agent`, que escribe exactamente este contenido y reinicia el servicio (§14).
 
 Añade:
 
@@ -703,34 +771,30 @@ sudo systemctl start ollama.service
 
 ---
 
-# 11. Estructura propuesta para este repositorio
+# 11. Estructura de este repositorio
 
-Empieza con el README y añade scripts pequeños, idempotentes y separados por responsabilidad. No mezcles instalación del sistema, configuración del servicio, descarga de modelos y benchmarks en un único script gigante.
+La estructura real, que ya incluye los scripts de perfiles y benchmarks:
 
 ```text
-local-llm-workstation/
+local-ia/
 ├── README.md
+├── install.sh              # paquetes + servicio + pasos opcionales
 ├── .gitignore
+├── profiles/
+│   ├── autocomplete.env    # Neovim inline: ctx 4K, 2 modelos, keep_alive=-1
+│   ├── agent.env           # OpenCode: ctx 64K, 1 modelo
+│   ├── hybrid.env          # ambos: ctx 32K, 2 modelos, keep_alive=30m
+│   └── lean.env            # diagnóstico: sin flash-attn ni KV quantizado
 ├── scripts/
-│   ├── check-system.sh       # GPU, driver, Vulkan, RAM, paquetes y versiones
-│   ├── install-ollama.sh     # paquetes Arch y habilitar el servicio
-│   ├── configure-ollama.sh   # override systemd y parámetros seleccionados
-│   ├── install-opencode.sh   # instalación opcional de OpenCode
-│   ├── pull-models.sh        # descarga selectiva de modelos
-│   ├── health-check.sh       # API, servicio, Vulkan y ollama ps
-│   └── benchmark.sh          # captura metadatos y resultados de pruebas
-├── config/
-│   ├── systemd/
-│   │   └── ollama.conf       # override documentado, no archivo unit completo
-│   └── opencode/
-│       └── opencode.json    # configuración de ejemplo sin secretos
-├── docs/
-│   ├── model-selection.md    # decisiones y cambios en modelos
-│   ├── ollama.md             # tuning y operación
-│   └── llama-cpp.md          # compilación, GGUF y Vulkan
-└── benchmarks/
-    └── README.md             # metodología y resultados
+│   ├── ollama-profile.sh   # list | current | show | apply [--dry-run|--preload]
+│   ├── healthcheck.sh      # 7 bloques de verificación, exit 1 si falla algo
+│   └── bench.sh            # TTFT frío/caliente + tok/s de una petición FIM
+├── nvim/
+│   └── minuet.lua          # spec de lazy.nvim lista para copiar
+└── benchmarks/             # (opcional) resultados fechados
 ```
+
+Los pesos de los modelos **nunca** viven en el repo: con el paquete de Arch están en `/var/lib/ollama`, propiedad del usuario `ollama`.
 
 ## Principios para los scripts
 
@@ -828,25 +892,588 @@ No automatices una configuración que todavía no has validado en tu propia máq
 
 ---
 
-## Decisión inicial
+# 14. Perfiles de configuración y scripts
 
-Para empezar con una configuración funcional y sin complejidad innecesaria:
+## 14.1 Qué es un perfil aquí
+
+Un **perfil** es un archivo `profiles/<nombre>.env` con variables de entorno de Ollama. `scripts/ollama-profile.sh apply <nombre>` traduce ese archivo a un drop-in de systemd y reinicia el servicio.
 
 ```text
-Runtime:      Ollama
-Backend GPU:  Vulkan
-Modelo:       gpt-oss:20b
-Contexto:     64K
-KV cache:     q8_0 (si la combinación de backend/modelo es estable)
-Parallelism:  1
-Agente:       OpenCode
+profiles/autocomplete.env
+        │
+        │  ollama-profile.sh apply autocomplete
+        v
+/etc/systemd/system/ollama.service.d/override.conf
+        │
+        │  systemctl daemon-reload && systemctl restart ollama.service
+        v
+ollama serve (con las variables aplicadas)
 ```
 
-Primero mide esa combinación sobre Owned. Gemma 4 12B será la alternativa para más contexto y margen de VRAM. Qwen3.8 27B Q3 será la prueba avanzada en llama.cpp. Mantén el criterio de selección basado en diffs correctos, tests ejecutados, tool calling fiable, contexto retenido y rendimiento real, no solo en el tamaño del modelo o una puntuación sintética.
+Conviene perfilar porque las dos cargas piden cosas opuestas:
 
-ollama pull gpt-oss:20b
+| Recurso      | Agente (OpenCode)     | Autocompletado (Neovim)  |
+| ------------ | --------------------- | ------------------------ |
+| Contexto     | 32K–64K               | 4K                       |
+| Modelo       | 12–20 GB (MoE grande) | ~1 GB (1.5B)             |
+| Latencia     | Segundos aceptables   | Decenas de ms            |
+| Paralelismo  | 1                     | 1–2                      |
+| Keep alive   | 30 min                | indefinido (`-1`)        |
+
+No hay un valor único que sirva para ambos. Forzar 64K de contexto para completar dos líneas desperdicia KV cache y hace la petición más lenta; forzar 4K para un agente rompe tareas multi-archivo.
+
+## 14.2 Los cuatro perfiles incluidos
+
+| Perfil         | Modelo por defecto   | ctx    | Paralelo | Modelos | keep_alive | Para qué |
+| -------------- | -------------------- | ------ | -------- | ------- | ---------- | -------- |
+| `autocomplete` | `qwen2.5-coder:1.5b` | 4 096  | 2        | 2       | `-1`       | Ghost text. Latencia mínima, modelo siempre caliente |
+| `agent`        | `gpt-oss:20b`        | 65 536 | 1        | 1       | `30m`      | OpenCode con contexto largo |
+| `hybrid`       | `qwen2.5-coder:1.5b` | 32 768 | 2        | 2       | `30m`      | Neovim + OpenCode en la misma sesión |
+| `lean`         | `qwen2.5-coder:1.5b` | 4 096  | 1        | 1       | `10m`      | Diagnóstico: sin flash-attn ni KV cuantizada |
+
+Los tres primeros llevan `OLLAMA_FLASH_ATTENTION=1` y `OLLAMA_KV_CACHE_TYPE=q8_0`; `lean` los omite a propósito para descartar la optimización como causa de un fallo.
+
+Cada archivo puede llevar además metadatos que **no** se escriben en systemd:
+
+```bash
+OLLAMA_DEFAULT_MODEL=qwen2.5-coder:1.5b
+```
+
+Ese valor lo consumen `apply --preload`, `bench.sh` y `install.sh` para saber qué cargar.
+
+## 14.3 Uso del script
+
+```bash
+./scripts/ollama-profile.sh list
+./scripts/ollama-profile.sh current
+./scripts/ollama-profile.sh show autocomplete
+./scripts/ollama-profile.sh apply autocomplete --dry-run
+sudo ./scripts/ollama-profile.sh apply autocomplete --preload
+```
+
+| Comando | Qué hace |
+| ------- | -------- |
+| `list` | Nombre, modelo y primera línea de comentario de cada perfil |
+| `current` | Servicio activo, contenido del drop-in y variables **efectivas** (`systemctl show -p Environment`), más `ollama ps` |
+| `show` | Imprime el perfil tal cual |
+| `apply` | Backup del drop-in, escribe el nuevo, `daemon-reload`, `restart`, espera la API |
+| `apply --dry-run` | Muestra el drop-in resultante sin tocar nada |
+| `apply --no-restart` | Escribe pero no reinicia (los cambios no están activos) |
+| `apply --preload` | Además carga el `OLLAMA_DEFAULT_MODEL` en VRAM |
+
+`apply` hace **backup** antes de escribir:
+
+```text
+/etc/systemd/system/ollama.service.d/override.conf.bak.20261110-124110
+```
+
+Revertir es restaurar ese archivo y ejecutar `sudo systemctl daemon-reload && sudo systemctl restart ollama.service`.
+
+## 14.4 Crear un perfil nuevo
+
+```bash
+cp profiles/autocomplete.env profiles/mi-perfil.env
+$EDITOR profiles/mi-perfil.env     # cambia las variables y la cabecera
+./scripts/ollama-profile.sh list    # aparece automáticamente
+./scripts/ollama-profile.sh apply mi-perfil --dry-run
+```
+
+No hay registro central: el script descubre todo lo que haya en `profiles/*.env`.
+
+## 14.5 Detalle importante: cambiar el contexto recarga el modelo
+
+`OLLAMA_CONTEXT_LENGTH` no es un parámetro que se pueda cambiar en caliente. Al modificarlo, la siguiente petición provoca una **recarga completa** del modelo. Medido en este equipo con `qwen2.5-coder:1.5b`:
+
+```text
+petición con num_ctx=4096   →  caliente, TTFT 9 ms
+petición con num_ctx=65536  →  recarga, TTFT 1354 ms, load_duration 1.19 s
+```
+
+Por eso los perfiles fijan el contexto **por sesión de trabajo** y no se cambia por petición. Si vas a alternar mucho entre agente y autocompletado, usa `hybrid` (32K) en lugar de saltar entre 4K y 64K.
+
+## 14.6 Requisito de sudo
+
+Escribir en `/etc/systemd/system` y reiniciar el servicio exige root. El script llama a `sudo -v` al principio de `apply` (no en `list`, `current`, `show` ni `--dry-run`), así que la contraseña se pide una sola vez por ejecución.
+
+Si prefieres no dar sudo a un script, `apply --dry-run` genera el contenido exacto y puedes copiarlo a mano:
+
+```bash
+sudo systemctl edit ollama.service
+```
+
+---
+
+# 15. Referencia completa de parámetros de Ollama
+
+Esta sección está verificada contra **Ollama 0.40.15** (`ollama serve --help`) en Arch Linux. Los nombres son estables, pero los valores por defecto pueden cambiar entre versiones: comprueba la ayuda de tu binario con `ollama serve --help`.
+
+Hay **cuatro niveles** de configuración y conviene no confundirlos:
+
+| Nivel | Dónde se define | Alcance | Ejemplo |
+| ----- | --------------- | ------- | ------- |
+| 1. Entorno del servidor | systemd / `ollama serve` | Todo el proceso | `OLLAMA_CONTEXT_LENGTH` |
+| 2. Modelfile | `ollama create` | Un modelo concreto | `PARAMETER num_ctx 4096` |
+| 3. Petición HTTP | `options` en `/api/*` | Una llamada | `"num_predict": 64` |
+| 4. `keep_alive` | Petición o servidor | Tiempo en memoria | `-1` |
+
+## 15.1 Variables de entorno del servidor
+
+### Red y servicio
+
+| Variable | Default | Qué controla | Cuándo tocarla |
+| -------- | ------- | ------------ | -------------- |
+| `OLLAMA_HOST` | `127.0.0.1:11434` | Dirección/puerto de escucha | Exponer en LAN (`0.0.0.0:11434`) sólo con firewall y auth delante |
+| `OLLAMA_ORIGINS` | sólo `localhost` | Orígenes permitidos para CORS | Cliente web en otro host |
+| `OLLAMA_MODELS` | `~/.ollama/models` | Directorio de pesos | Aquí: `/var/lib/ollama` (servicio de sistema) |
+| `OLLAMA_DEBUG` | `0` | Log verboso | Diagnosticar cargas y shaders |
+| `OLLAMA_DEBUG_LOG_REQUESTS` | `0` | Loguea peticiones y respuestas completas | Sólo en depuración: **incluye tu código** |
+| `OLLAMA_NO_CLOUD` | `0` | Desactiva inferencia remota y web search | `1` si quieres garantía de que nada sale del equipo |
+| `OLLAMA_NOPRUNE` | `0` | No borra blobs huérfanos al arrancar | `1` sólo si gestionas blobs a mano |
+| `OLLAMA_MAX_TRANSFER_STREAMS` | `4` | Descargas paralelas de `pull`/`push` | Subirlo acelera pulls en conexiones rápidas |
+
+### Memoria, contexto y scheduling
+
+| Variable | Default | Qué controla | Cuándo tocarla |
+| -------- | ------- | ------------ | -------------- |
+| `OLLAMA_CONTEXT_LENGTH` | según VRAM (4K/32K/256K) | Contexto por defecto si la petición no lo fija | Fijarlo explícitamente; es el parámetro que más afecta a VRAM y velocidad |
+| `OLLAMA_NUM_PARALLEL` | auto (1 o 4 según VRAM) | Peticiones simultáneas por modelo | `1` para latencia predecible; cada slot extra multiplica la KV cache |
+| `OLLAMA_MAX_LOADED_MODELS` | 3 × nº de GPUs | Modelos distintos en memoria a la vez | `2` si quieres coder + chat sin expulsiones |
+| `OLLAMA_MAX_QUEUE` | `512` | Peticiones en cola antes de rechazar | Bajar en equipos pequeños |
+| `OLLAMA_KEEP_ALIVE` | `5m` | Tiempo que el modelo permanece cargado | `-1` para no pagar nunca un cold start; `0` para descargar al terminar |
+| `OLLAMA_LOAD_TIMEOUT` | `5m` | Tiempo máximo permitido para cargar | Subir si cargas modelos de 30B+ desde disco lento |
+| `OLLAMA_GPU_OVERHEAD` | `0` | VRAM reservada por GPU (bytes) | Reservar margen si el driver compite con el escritorio |
+| `OLLAMA_SCHED_SPREAD` | `0` | Reparte el modelo entre todas las GPUs | Multi-GPU, no en una sola tarjeta |
+| `OLLAMA_IGPU_ENABLE` | `0` | Habilita iGPU | Portátiles híbridos |
+| `OLLAMA_LLM_LIBRARY` | auto | Fuerza una librería de inferencia | Depurar selección de backend |
+
+### Calidad y matemática
+
+| Variable | Default | Qué controla | Cuándo tocarla |
+| -------- | ------- | ------------ | -------------- |
+| `OLLAMA_FLASH_ATTENTION` | según versión | Flash Attention (menos VRAM en contextos largos) | `1` casi siempre; `0` si ves resultados corruptos |
+| `OLLAMA_KV_CACHE_TYPE` | `f16` | Cuantización de la KV cache: `f16`, `q8_0`, `q4_0` | `q8_0` reduce ~50% la cache con pérdida mínima; `q4_0` sólo si falta VRAM |
+| `LLAMA_ARG_FIT` | `on` | Deja que llama.cpp ajuste automáticamente opciones de memoria | `off` para control manual exacto |
+| `LLAMA_ARG_FIT_TARGET` | según build | Margen libre de VRAM objetivo (MiB) | Subirlo si el driver sufre OOM |
+
+### Backend específico de Arch
+
+| Variable | Valor | Qué controla |
+| -------- | ----- | ------------ |
+| `OLLAMA_VULKAN` | `1` | Activa el backend Vulkan del paquete `ollama-vulkan`. Sin esto, el binario usa CPU o ROCm si está disponible |
+
+No aparece en `ollama serve --help` porque la detecta la build empaquetada, pero es la que hace que la RX 9060 XT aparezca como `100% GPU` en `ollama ps`.
+
+## 15.2 Opciones por petición (`options`)
+
+Se envían en el cuerpo de `/api/generate` o `/api/chat`. Son **por llamada**: no requieren reiniciar el servicio (salvo las que fuerzan recarga de contexto, como `num_ctx`).
+
+### Longitud y muestreo
+
+| Parámetro | Default | Efecto | Nota práctica |
+| --------- | ------- | ------ | ------------- |
+| `num_predict` | `-1` | Tokens máximos a generar | Para inline: 48–96. Más alto = más latencia |
+| `num_keep` | `4` | Tokens iniciales que se conservan al truncar | Rara vez se toca |
+| `temperature` | `0.8` | Aleatoriedad | `0` para completado determinista |
+| `top_k` | `40` | Recorta a los K tokens más probables | `40` está bien; `1` = greedy |
+| `top_p` | `0.9` | Muestreo nucleus | `0.9`–`0.95` |
+| `min_p` | `0.0` | Descarta tokens con probabilidad < min_p × p_max | Alternativa moderna a `top_p` |
+| `typical_p` | `1.0` | Muestreo típico | Dejar en 1 salvo experiments |
+| `tfs_z` | `1.0` | Tail-free sampling | Obsoleto en la práctica |
+| `repeat_penalty` | `1.1` | Penaliza repetición | `1.0` para código; `1.1` si repite líneas |
+| `repeat_last_n` | `64` | Ventana para la penalización | `64`–`256` |
+| `presence_penalty` | `0.0` | Penaliza tokens ya presentes | FIM suele ir a `0` |
+| `frequency_penalty` | `0.0` | Penaliza por frecuencia | FIM suele ir a `0` |
+| `penalize_newline` | `true` | Penaliza `\n` | **`false` para código**: si no, evita saltos de línea |
+| `seed` | aleatorio | Semilla | Fijarla para benchmarks reproducibles |
+| `stop` | `[]` | Cadenas que cortan la generación | Con plantilla FIM no hace falta: el modelo corta en `<|fim_middle|>` |
+
+### Memoria y ejecución
+
+| Parámetro | Default | Efecto | Nota práctica |
+| --------- | ------- | ------ | ------------- |
+| `num_ctx` | el del servidor | Ventana de contexto | **Forzarlo recarga el modelo**. En este repo se fija por perfil |
+| `num_batch` | `512` | Tokens por lote en el prefill | Subir acelera prompts largos si sobra VRAM |
+| `num_gpu` | auto | Capas a offload a GPU | `999` fuerza todas; bajar si hay OOM |
+| `main_gpu` | `0` | GPU principal | Multi-GPU |
+| `low_vram` | `false` | Modo de VRAM reducida | Sólo si no cabe de otra forma: muy lento |
+| `f16_kv` | `true` | KV cache en fp16 | `false` usa el tipo de `OLLAMA_KV_CACHE_TYPE` |
+| `use_mmap` | `true` | Mapea pesos desde disco | `false` acelera cargas repetidas usando más RAM |
+| `use_mlock` | `false` | Bloquea pesos en RAM | Evita swap a costa de RAM |
+| `num_thread` | núcleos físicos | Hilos de CPU | Irrelevante si todo está en GPU |
+| `numa` | `false` | Optimización NUMA | Servidores multi-socket |
+| `vocab_only` | `false` | Carga sólo el vocabulario | Depuración |
+
+### `mirostat` (muestreo adaptativo)
+
+| Parámetro | Default | Efecto |
+| --------- | ------- | ------ |
+| `mirostat` | `0` | `0` desactivado, `1` Mirostat, `2` Mirostat 2.0 |
+| `mirostat_tau` | `5.0` | Perplejidad objetivo (menor = más conservador) |
+| `mirostat_eta` | `0.1` | Tasa de aprendizaje del control |
+
+Para código, `temperature=0` da resultados más estables que Mirostat. Mirostat es útil en texto libre donde quieres evitar bucles sin bajar la temperatura.
+
+## 15.3 Campos de la petición HTTP
+
+`POST /api/generate`:
+
+| Campo | Tipo | Para qué |
+| ----- | ---- | -------- |
+| `model` | string | Nombre exacto, p. ej. `qwen2.5-coder:1.5b` |
+| `prompt` | string | Texto antes del cursor |
+| `suffix` | string | **Texto después del cursor** (FIM). Sólo se usa si la plantilla del modelo tiene `{{ .Suffix }}` |
+| `system` | string | System prompt (ignorado por plantillas FIM puras) |
+| `template` | string | Sobrescribe la plantilla del modelo para esta llamada |
+| `images` | array | Imágenes en base64 (modelos multimodales) |
+| `format` | `json` o schema | Salida estructurada |
+| `options` | objeto | Todo lo de §15.2 |
+| `stream` | bool | `true` devuelve NDJSON token a token (lo que usa el ghost text) |
+| `raw` | bool | `true` no aplica plantilla: tú mandas los marcadores FIM a mano |
+| `keep_alive` | string/número | `"5m"`, `"30m"`, `-1` (nunca descargar), `0` (descargar al acabar) |
+| `context` | array | Contexto devuelto por una llamada anterior (API legacy, no usar con FIM) |
+
+Verificar que un modelo soporta FIM:
+
+```bash
+curl -s http://127.0.0.1:11434/api/show -d '{"model":"qwen2.5-coder:1.5b"}' \
+  | jq -r '.capabilities, .template' | head -20
+```
+
+Debe aparecer `insert` en `capabilities` y una plantilla con `<|fim_prefix|>`, `<|fim_suffix|>` y `<|fim_middle|>`. Si no, ese modelo no sirve para completado inline.
+
+Prueba directa de FIM (la misma forma que usa minuet):
+
+```bash
+curl -s http://127.0.0.1:11434/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen2.5-coder:1.5b",
+    "prompt": "def suma(a, b):\n    ",
+    "suffix": "\n\nprint(suma(1, 2))",
+    "max_tokens": 32,
+    "temperature": 0
+  }' | jq -r '.choices[0].text'
+```
+
+## 15.4 Modelfile
+
+Un Modelfile crea una variante de modelo con parámetros fijos. Útil cuando quieres un "modelo" que ya lleve tu configuración sin depender del entorno del servicio.
+
+```dockerfile
+FROM qwen2.5-coder:1.5b
+
+# Contexto por defecto de este modelo
+PARAMETER num_ctx 4096
+PARAMETER temperature 0
+PARAMETER num_predict 64
+PARAMETER stop "<|fim_middle|>"
+
+# Plantilla (normalmente NO se toca: la del modelo ya es FIM)
+# TEMPLATE """..."""
+```
+
+```bash
+ollama create coder-inline -f Modelfile
+ollama run coder-inline
+```
+
+| Instrucción | Función |
+| ----------- | ------- |
+| `FROM` | Modelo base o ruta a GGUF/safetensors |
+| `PARAMETER` | Cualquier opción de §15.2 como valor por defecto |
+| `TEMPLATE` | Plantilla de prompt completa |
+| `SYSTEM` | System prompt por defecto |
+| `ADAPTER` | LoRA/adaptador |
+| `MESSAGE` | Mensajes de few-shot para `ollama run` |
+| `LICENSE` | Texto de licencia |
+
+Los `PARAMETER` del Modelfile son **defaults**: una petición puede sobrescribirlos con `options`. La excepción práctica es `num_ctx`, que sigue forzando recarga si cambia respecto al valor cargado.
+
+## 15.5 Qué respeta la capa OpenAI-compatible
+
+Minuet habla con `http://127.0.0.1:11434/v1/completions`. Esa capa implementa el subconjunto OpenAI:
+
+| Se respeta | No se respeta (se ignora) |
+| ---------- | ------------------------- |
+| `model`, `prompt`, `suffix`, `stream` | `num_ctx`, `num_batch`, `num_gpu`, `low_vram` |
+| `max_tokens` → `num_predict` | `num_thread`, `use_mmap`, `use_mlock` |
+| `temperature`, `top_p`, `stop`, `seed` | `mirostat*`, `tfs_z`, `typical_p` |
+| `presence_penalty`, `frequency_penalty` | `numa`, `vocab_only`, `main_gpu` |
+
+Consecuencia práctica: **el contexto para el autocompletado se fija en el servidor** (`OLLAMA_CONTEXT_LENGTH`, vía perfil), no en el cliente. Es exactamente lo que hace `profiles/autocomplete.env` con `4096`.
+
+Si necesitas control fino por petición, usa `/api/generate` en vez del endpoint OpenAI-compatible.
+
+---
+
+# 16. Autocompletado inline en Neovim
+
+## 16.1 Por qué no Supermaven
+
+El plugin `supermaven-nvim` sigue funcionando como cliente, pero el backend rechaza las peticiones de completado de esta cuenta. Evidencia recogida en este equipo:
+
+1. El agente conecta, se identifica (`UserStatus: Free Tier`) y recibe un `popup`:
+
+   ```json
+   {"kind":"popup","message":"We don't have an active payment method on file for your account..."}
+   ```
+
+2. Inmediatamente después, cada `cursor_update` provoca un **RST del servidor ~1 RTT después** (~95 ms), no un cierre ordenado.
+3. Conexiones sin peticiones de completado aguantan minutos; el fallo sólo aparece al pedir completado.
+4. Supermaven anunció su cierre el **21-nov-2025** y sólo prometió inferencia gratuita a clientes existentes. La cuenta de este equipo se activó el **27-dic-2025**.
+
+No es un problema local: reautenticar, borrar el binario o tocar DNS/TLS no cambia nada. De ahí la migración a un modelo local.
+
+## 16.2 Arquitectura del autocompletado local
+
+```text
+Neovim (insert mode)
+   │
+   │  minuet-ai.nvim: debounce + throttle
+   v
+POST http://127.0.0.1:11434/v1/completions
+   │  { model, prompt: <antes del cursor>, suffix: <después del cursor> }
+   v
+Ollama aplica la plantilla FIM del modelo
+   │  <|fim_prefix|>…<|fim_suffix|>…<|fim_middle|>
+   v
+qwen2.5-coder:1.5b (Vulkan, 100% GPU)
+   │
+   │  NDJSON en streaming
+   v
+minuet dibuja el ghost text → <C-a> acepta
+```
+
+## 16.3 Instalación
+
+```bash
+# Opción A: desde este repo
+./install.sh --neovim
+
+# Opción B: manual
+cp nvim/minuet.lua ~/.config/nvim/lua/plugins/minuet.lua
+```
+
+Con lazy.nvim el archivo se carga solo (está en `lua/plugins/`). En el primer arranque descarga el plugin. **Desactiva cualquier otro plugin de completado inline** para no tener dos ghost texts compitiendo.
+
+Requisitos:
+
+```bash
+ollama pull qwen2.5-coder:1.5b
+./scripts/ollama-profile.sh apply autocomplete --preload
+```
+
+## 16.4 Parámetros de la configuración
+
+| Opción | Valor aquí | Por qué |
+| ------ | ---------- | ------- |
+| `provider` | `openai_fim_compatible` | Usa `/v1/completions` con `prompt`+`suffix`, que es lo que Ollama espera para FIM |
+| `n_completions` | `1` | Cada item extra es otra petición HTTP completa |
+| `context_window` | `8000` caracteres | ≈2000 tokens; cabe en `num_ctx=4096` dejando espacio para generar |
+| `context_ratio` | `0.75` | 3:1 a favor del texto anterior al cursor |
+| `debounce` | `150` ms | Espera a que dejes de teclear antes de pedir |
+| `throttle` | `0` | Sin límite extra: el debounce ya controla la frecuencia |
+| `request_timeout` | `1.5` s | Con streaming, corta si no hay texto útil |
+| `notify` | `error` | Evita avisos en cada petición |
+| `virtualtext.auto_trigger_ft` | `{'*'}` | Todos los filetypes menos los excluidos |
+| `auto_trigger_ignore_ft` | cpp, gitcommit, lazy, … | El 1.5B sufre con C++ templado y en buffers de UI molesta |
+| `api_key` | `'TERM'` | Ollama lo ignora, pero minuet exige un nombre de variable existente |
+| `optional.max_tokens` | `64` | Suficiente para 2–4 líneas |
+| `optional.temperature` | `0` | Completado determinista |
+
+Keymaps (idénticos en espíritu a los que ya usabas):
+
+| Tecla | Acción |
+| ----- | ------ |
+| `<C-a>` | Aceptar la sugerencia completa |
+| `<C-w>` | Aceptar sólo la primera línea |
+| `<M-C-a>` | Aceptar N líneas (pregunta cuántas) |
+| `<M-]>` / `<M-[>` | Siguiente / anterior sugerencia |
+| `<C-]>` | Descartar |
+
+## 16.5 Cambiar de modelo sin editar el archivo
+
+```vim
+:Minuet change_model qwen2.5-coder:7b
+:Minuet virtualtext toggle
+```
+
+O por variables de entorno antes de abrir Neovim:
+
+```bash
+OLLAMA_FIM_MODEL=qwen2.5-coder:7b nvim
+```
+
+El 7B ocupa ~4,7 GB y da mejor calidad a costa de latencia (§17). En `16 GB` conviene no tenerlo cargado junto a `gpt-oss:20b`.
+
+## 16.6 Verificar que funciona
+
+```bash
+# 1. El modelo está cargado en GPU
+ollama ps
+
+# 2. El endpoint FIM responde
+./scripts/bench.sh qwen2.5-coder:1.5b --warm-only
+
+# 3. En Neovim, tras escribir
+:checkhealth minuet
+:Minuet virtualtext toggle   # apagar/encender para ver si el estado cambia
+```
+
+Si `ollama ps` muestra `CONTEXT 4096` y `100% GPU`, el camino está completo.
+
+---
+
+# 17. Benchmarks medidos en este equipo
+
+Metodología: misma petición FIM real (código Lua con hueco), `temperature=0`, `stream=true`, medido con `scripts/bench.sh`. TTFT = tiempo hasta el primer token con contenido.
+
+Hardware: AMD RX 9060 XT 16 GB (Navi 44), Vulkan, Arch Linux, kernel 7.2.14, Ollama 0.40.15.
+
+## 17.1 `qwen2.5-coder:1.5b` — `num_ctx=4096`
+
+| Escenario | TTFT | Total (64 tok) | tok/s | Carga |
+| --------- | ---- | -------------- | ----- | ----- |
+| Frío (modelo descargado) | 1 279 ms | 1,68 s | 160 | 0,90 s |
+| Caliente | **9 ms** | **0,38 s** | **174** | 0,00 s |
+
+## 17.2 `qwen2.5-coder:1.5b` — `num_ctx=65536` (mismo modelo, contexto distinto)
+
+| Escenario | TTFT | Total | tok/s | Carga |
+| --------- | ---- | ----- | ----- | ----- |
+| Caliente tras cambiar ctx | 1 354 ms | 1,74 s | 166 | 1,19 s |
+
+Confirma que **cambiar el contexto obliga a recargar**. La velocidad de generación es la misma; el castigo está en la carga.
+
+## 17.3 `gpt-oss:20b` — `num_ctx=65536`
+
+| Escenario | TTFT | Total (48 tok) | tok/s | Carga |
+| --------- | ---- | -------------- | ----- | ----- |
+| Frío | **20 790 ms** | 21,44 s | — | 20,8 s |
+| Caliente | 80 ms | 0,74 s | 65 | 0,00 s |
+
+Dos conclusiones:
+
+1. **No sirve para inline**: 20 s hasta el primer token tras 5 minutos de inactividad.
+2. **No es un modelo FIM**: sus capabilities son `completion, tools, thinking`, sin `insert`. No rellena huecos aunque le pases `suffix`.
+
+## 17.4 Cómo reproducirlo
+
+```bash
+./scripts/bench.sh qwen2.5-coder:1.5b
+./scripts/bench.sh qwen2.5-coder:1.5b --ctx 8192
+./scripts/bench.sh gpt-oss:20b --ctx 65536 --tokens 48
+./scripts/bench.sh qwen2.5-coder:7b
+```
+
+`--warm-only` evita descargar el modelo y mide sólo el caso caliente. Sin ese flag, el script ejecuta `ollama stop` antes de la primera medición.
+
+## 17.5 Interpretación para uso real
+
+- Con el perfil `autocomplete` (`keep_alive=-1`) sólo pagas la carga en frío **una vez por arranque del servicio**. Después, 9 ms de TTFT: el ghost text aparece antes de que levantes la tecla.
+- El total de 380 ms para 64 tokens es el peor caso (completion larga). Una línea típica son 10–20 tokens: ~100 ms.
+- Si ves 1–2 s por pulsación, no es el modelo: es `keep_alive` sin fijar, contexto demasiado grande, o el modelo se está recargando por cambio de perfil.
+
+---
+
+# 18. Operación diaria y resolución de problemas
+
+## 18.1 Checklist cuando no hay sugerencias
+
+```bash
+# 1. ¿Servicio arriba?
+systemctl is-active ollama.service
+
+# 2. ¿API responde?
+curl -fsS http://127.0.0.1:11434/api/version
+
+# 3. ¿Modelo instalado?
+ollama list | grep qwen2.5-coder
+
+# 4. ¿Modelo en GPU?
+ollama ps
+
+# 5. ¿El endpoint FIM responde?
+curl -s http://127.0.0.1:11434/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen2.5-coder:1.5b","prompt":"def f():\n    ","suffix":"\n","max_tokens":8}'
+```
+
+Si 1–5 pasan, el problema está en Neovim: `:checkhealth minuet`, `:lua =vim.lsp.get_clients()`, y confirma que el spec de minuet se cargó (`:Lazy`).
+
+## 18.2 Problemas frecuentes
+
+| Síntoma | Causa | Solución |
+| ------- | ----- | -------- |
+| Primera sugerencia tarda 1–2 s y luego va rápido | Modelo en frío | `apply autocomplete --preload`; o `OLLAMA_KEEP_ALIVE=-1` |
+| Todas las sugerencias tardan >1 s | Contexto global en 64K | Usa el perfil `autocomplete` (4K) |
+| `ollama ps` muestra `CPU/GPU` o `100% CPU` | Offloading por falta de VRAM | Baja de modelo o cuantización; `OLLAMA_GPU_OVERHEAD` |
+| Sugerencias cortadas a media palabra | `max_tokens` bajo | Subir a 96–128 |
+| Repite el texto que ya está escrito | Penalización de repetición | `repeat_penalty 1.0`, `presence_penalty 0` |
+| No respeta saltos de línea | `penalize_newline` activo | `"penalize_newline": false` con `/api/generate` |
+| Ghost text aparece en buffers de UI | Faltan exclusiones | Añadir filetype a `auto_trigger_ignore_ft` |
+| Tras cambiar de perfil todo va lento | Modelos expulsados de VRAM | Volver a precalentar; o usar `hybrid` |
+| `CUDA out of memory` / runner muere | Dos modelos grandes a la vez | `OLLAMA_MAX_LOADED_MODELS=1` o modelo menor |
+| El servicio no arranca tras editar el drop-in | Sintaxis de systemd | `systemd-analyze verify ollama.service`; `journalctl -u ollama -n 50` |
+
+## 18.3 Comandos de referencia rápida
+
+```bash
+# Estado completo
+./scripts/healthcheck.sh
+
+# Perfiles
+./scripts/ollama-profile.sh list
+./scripts/ollama-profile.sh current
+./scripts/ollama-profile.sh apply autocomplete --dry-run
+sudo ./scripts/ollama-profile.sh apply autocomplete --preload
+
+# Benchmarks
+./scripts/bench.sh qwen2.5-coder:1.5b
+./scripts/bench.sh --warm-only
+
+# Servicio
+systemctl status ollama.service
+journalctl -u ollama.service -f
+ollama ps
+ollama list
+```
+
+## 18.4 Qué NO hacer
+
+- No cambiar `OLLAMA_CONTEXT_LENGTH` por petición esperando que sea gratis: recarga el modelo.
+- No poner `OLLAMA_NUM_PARALLEL` alto "por si acaso": multiplica la KV cache y reduce la velocidad por petición.
+- No ejecutar un segundo `ollama serve` en una terminal mientras el servicio está activo: compiten por el puerto y por la GPU.
+- No fijar `OLLAMA_KEEP_ALIVE=-1` con un modelo de 20B si también usas el escritorio: se queda con la VRAM.
+- No usar `OLLAMA_DEBUG_LOG_REQUESTS=1` de forma permanente: escribe tu código en el journal.
+
+---
+
+## Decisión inicial
+
+Configuración de partida, ya validada en este equipo (10-nov-2026):
+
+```text
+Runtime:      Ollama 0.40.15
+Backend GPU:  Vulkan (paquete ollama-vulkan)
+Modelos:      qwen2.5-coder:1.5b  → autocompletado inline en Neovim
+              gpt-oss:20b         → agente en OpenCode
+Contexto:     4K (autocompletado) / 64K (agente), por perfil
+KV cache:     q8_0 + flash attention
+Parallelism:  2 (autocompletado) / 1 (agente)
+Modelos en VRAM: 2 como máximo
+```
+
+Los dos modelos no compiten si se cambia de perfil: `autocomplete` deja cargados coder + chat, `agent` deja sólo `gpt-oss`. Gemma 4 12B es la alternativa para más contexto con margen de VRAM; Qwen3.8 27B Q3 es la prueba avanzada en llama.cpp. Mantén el criterio de selección basado en diffs correctos, tests ejecutados, tool calling fiable, contexto retenido y rendimiento real, no sólo en el tamaño del modelo o una puntuación sintética.
+
+```bash
+ollama pull qwen2.5-coder:1.5b   # 986 MB — autocompletado
+ollama pull gpt-oss:20b          #  13 GB — agente
+# opcionales
+ollama pull qwen2.5-coder:7b     # 4,7 GB — más calidad, más latencia
 ollama pull gemma4:12b
 ollama pull qwen3.8:27b-q4_K_M
+```
 
 # TOOLS O REQUESUS EXTRAS
 

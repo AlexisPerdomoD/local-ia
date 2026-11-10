@@ -1,0 +1,21 @@
+# Pesos de modelos y artefactos grandes
+models/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Salidas de ejecución y benchmarks
+logs/
+*.log
+benchmarks/raw/
+
+# Secretos y configuración local
+.env
+.env.*
+!.env.example
+config/opencode/opencode.local.json
+
+# Basura del sistema
+.DS_Store
