@@ -104,7 +104,7 @@ Desde este repositorio, en una máquina Arch ya instalada:
 ollama pull qwen2.5-coder:1.5b
 
 # 3. Aplicar el perfil de latencia mínima (pide sudo)
-./scripts/ollama-profile.sh apply autocomplete --preload
+./scripts/ollama-profile.sh apply autocomplete
 
 # 4. Medir
 ./scripts/bench.sh qwen2.5-coder:1.5b
@@ -781,7 +781,7 @@ local-ia/
 ├── install.sh              # paquetes + servicio + pasos opcionales
 ├── .gitignore
 ├── profiles/
-│   ├── autocomplete.env    # Neovim inline: ctx 4K, 2 modelos, keep_alive=-1
+│   ├── autocomplete.env    # Neovim inline: ctx 4K, 2 modelos, keep_alive=5m
 │   ├── agent.env           # OpenCode: ctx 64K, 1 modelo
 │   ├── hybrid.env          # ambos: ctx 32K, 2 modelos, keep_alive=30m
 │   └── lean.env            # diagnóstico: sin flash-attn ni KV quantizado
@@ -918,7 +918,7 @@ Conviene perfilar porque las dos cargas piden cosas opuestas:
 | Modelo       | 12–20 GB (MoE grande) | ~1 GB (1.5B)             |
 | Latencia     | Segundos aceptables   | Decenas de ms            |
 | Paralelismo  | 1                     | 1–2                      |
-| Keep alive   | 30 min                | indefinido (`-1`)        |
+| Keep alive   | 30 min                | 5 min (on-demand)        |
 
 No hay un valor único que sirva para ambos. Forzar 64K de contexto para completar dos líneas desperdicia KV cache y hace la petición más lenta; forzar 4K para un agente rompe tareas multi-archivo.
 
@@ -926,7 +926,7 @@ No hay un valor único que sirva para ambos. Forzar 64K de contexto para complet
 
 | Perfil         | Modelo por defecto   | ctx    | Paralelo | Modelos | keep_alive | Para qué |
 | -------------- | -------------------- | ------ | -------- | ------- | ---------- | -------- |
-| `autocomplete` | `qwen2.5-coder:1.5b` | 4 096  | 2        | 2       | `-1`       | Ghost text. Latencia mínima, modelo siempre caliente |
+| `autocomplete` | `qwen2.5-coder:1.5b` | 4 096  | 2        | 2       | `5m`       | Ghost text. Latencia mínima, on-demand |
 | `agent`        | `gpt-oss:20b`        | 65 536 | 1        | 1       | `30m`      | OpenCode con contexto largo |
 | `hybrid`       | `qwen2.5-coder:1.5b` | 32 768 | 2        | 2       | `30m`      | Neovim + OpenCode en la misma sesión |
 | `lean`         | `qwen2.5-coder:1.5b` | 4 096  | 1        | 1       | `10m`      | Diagnóstico: sin flash-attn ni KV cuantizada |
@@ -1366,7 +1366,7 @@ Dos conclusiones:
 
 Modelo `7.6B Q4_K_M`, `capabilities: completion, tools, insert` (sí es FIM), 4,6 GB en VRAM con 4K de contexto.
 
-Comparado con el 1.5b: el TTFT caliente es igual de bueno (20 ms vs 9 ms), pero **genera 3× más lento** (57 vs 174 tok/s). Para una línea típica de 15 tokens son ~290 ms frente a ~100 ms. El cold start también triplica (4,2 s vs 0,9 s), lo que hace el `keep_alive=-1` aún más importante.
+Comparado con el 1.5b: el TTFT caliente es igual de bueno (20 ms vs 9 ms), pero **genera 3× más lento** (57 vs 174 tok/s). Para una línea típica de 15 tokens son ~290 ms frente a ~100 ms. El cold start también triplica (4,2 s vs 0,9 s).
 
 ## 17.5 Cómo reproducirlo
 
@@ -1381,7 +1381,7 @@ Comparado con el 1.5b: el TTFT caliente es igual de bueno (20 ms vs 9 ms), pero 
 
 ## 17.6 Interpretación para uso real
 
-- Con el perfil `autocomplete` (`keep_alive=-1`) sólo pagas la carga en frío **una vez por arranque del servicio**. Después, 9 ms de TTFT: el ghost text aparece antes de que levantes la tecla.
+- Con el perfil `autocomplete` (`keep_alive=5m`) el modelo **se carga en la primera petición y se descarga solo tras 5 minutos de inactividad**. Ese primer completion tras el idle cuesta ~1,3 s de TTFT; todos los siguientes, 9 ms.
 - El total de 380 ms para 64 tokens es el peor caso (completion larga). Una línea típica son 10–20 tokens: ~100 ms.
 - Si cambias al 7b, espera ~3× más tiempo por token. Sigue siendo usable, pero deja de sentirse instantáneo en completions largas.
 - Si ves 1–2 s por pulsación, no es el modelo: es `keep_alive` sin fijar, contexto demasiado grande, o el modelo se está recargando por cambio de perfil.
@@ -1417,7 +1417,7 @@ Si 1–5 pasan, el problema está en Neovim: `:checkhealth minuet`, `:lua =vim.l
 
 | Síntoma | Causa | Solución |
 | ------- | ----- | -------- |
-| Primera sugerencia tarda 1–2 s y luego va rápido | Modelo en frío | `apply autocomplete --preload`; o `OLLAMA_KEEP_ALIVE=-1` |
+| Primera sugerencia tarda 1–2 s y luego va rápido | Modelo en frío tras 5 min de inactividad | Es el comportamiento on-demand; sube `OLLAMA_KEEP_ALIVE` a `30m` si molesta |
 | Todas las sugerencias tardan >1 s | Contexto global en 64K | Usa el perfil `autocomplete` (4K) |
 | `ollama ps` muestra `CPU/GPU` o `100% CPU` | Offloading por falta de VRAM | Baja de modelo o cuantización; `OLLAMA_GPU_OVERHEAD` |
 | Sugerencias cortadas a media palabra | `max_tokens` bajo | Subir a 96–128 |
