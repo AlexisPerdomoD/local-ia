@@ -1,5 +1,20 @@
 # Local LLM Workstation
 
+> **TL;DR** — Un setup reproducible de inferencia local para dos cargas opuestas: un agente de
+> código con 64K de contexto y un modelo de autocompletado de baja latencia. Incluye cambio de
+> perfiles, health checks y benchmarks; sin nube ni claves de API.
+
+**Qué demuestra:** presupuesto de VRAM en una GPU AMD de 16 GB, configuración de systemd,
+metodología de benchmark (TTFT y tok/s) y la disciplina de escribir un setup que otra persona puede
+reproducir. Lo interesante no son los modelos: es que una sola máquina sirva dos cargas con
+requisitos incompatibles.
+
+**Medido en la máquina de referencia:** 9 ms de TTFT en una petición caliente de autocompletado a
+4K de contexto; cambiar ese mismo modelo a 64K fuerza una recarga y cuesta ~1,35 s hasta el primer
+token.
+
+---
+
 Guía para ejecutar modelos LLM locales en **Arch Linux + AMD Radeon RX 9060 XT de 16 GB**, con dos cargas de trabajo bien distintas:
 
 1. **Agente de código** (OpenCode) sobre repositorios reales.
