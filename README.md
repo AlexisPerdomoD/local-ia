@@ -1502,6 +1502,14 @@ ollama pull gemma4:12b
 ollama pull qwen3.8:27b-q4_K_M
 ```
 
-# TOOLS O REQUESUS EXTRAS
+## Herramientas y requisitos extra
 
+```bash
 sudo pacman -S amdgpu_top
+```
+
+---
+
+## Licencia
+
+MIT. Ver [LICENSE](LICENSE).
